@@ -1,4 +1,8 @@
-# TimeFinder
+<p align="center">
+  <img src="Resources/Assets.xcassets/AppIcon.appiconset/icon_256x256@2x.png" width="128" height="128" alt="TimeFinder app icon">
+</p>
+
+<h1 align="center">TimeFinder</h1>
 
 A Finder-style browser for Time Machine backups of *other* Macs — for example a `.sparsebundle`
 on a NAS or SMB share — so you can look around, preview, and restore files without the
