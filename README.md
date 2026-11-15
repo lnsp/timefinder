@@ -52,14 +52,32 @@ Out of the box the app is signed ad hoc ("Sign to Run Locally"), so no Apple Dev
 is needed. The catch: macOS ties Full Disk Access to the app's signature, and an ad-hoc signature
 changes with every build, so you'd have to grant Full Disk Access again after each rebuild.
 
-To avoid that, sign with your own team (a free Apple ID works):
+To avoid that, give your builds a stable signing identity in `Config/Local.xcconfig` (git-ignored):
 
 ```sh
-cp Config/Local.xcconfig.example Config/Local.xcconfig   # git-ignored; fill in your team ID
+cp Config/Local.xcconfig.example Config/Local.xcconfig
 ```
 
-Use `Config/Local.xcconfig` rather than picking a team in Xcode's Signing & Capabilities tab, which
-would write your team into the shared project file.
+and pick one of the two options in it: your Apple Developer team (a free Apple ID works), or a
+self-signed code-signing certificate in your keychain — which is what releases use. Use
+`Config/Local.xcconfig` rather than Xcode's Signing & Capabilities tab, which would write your
+settings into the shared project file.
+
+### Releasing
+
+```sh
+scripts/release.sh 1.2.3             # build, sign, verify, zip; renders the cask — publishes nothing
+scripts/release.sh 1.2.3 --publish   # also tags v1.2.3, creates the GitHub release, updates the tap
+```
+
+The script builds a universal (Apple silicon + Intel) Release build with the hardened runtime,
+signs it with the self-signed **TimeFinder Release Signing** certificate from your keychain
+(override with `TIMEFINDER_SIGNING_IDENTITY`), checks the signature, version and entitlements, and
+renders `packaging/homebrew/timefinder.rb` with the zip's checksum. Publishing uses the GitHub CLI
+(`gh`) and commits the cask to [lnsp/homebrew-tap](https://github.com/lnsp/homebrew-tap).
+
+Releases must always be signed with the same certificate: users' Full Disk Access permission is
+tied to it, and a new certificate would make every user grant it again.
 
 ## How it works
 
@@ -104,8 +122,9 @@ file names from your backups, including encrypted ones. Turn it off or clear it 
 - TimeFinder needs Full Disk Access, which allows reading everything on this Mac. It uses it only
   to mount and read the backups you open.
 - It runs Apple's own tools — `/usr/bin/hdiutil`, `/sbin/mount_apfs`, `/sbin/mount_hfs`,
-  `/sbin/umount`, `/usr/sbin/diskutil`, `/bin/chmod` (to remove inherited ACLs from restored
-  copies) — with fixed absolute paths, never through a shell and never with `sudo`.
+  `/sbin/umount`, `/usr/sbin/diskutil`, and `/usr/bin/find` with `/bin/chmod` (to remove
+  inherited ACLs from restored copies, never following symbolic links) — with fixed absolute
+  paths, never through a shell and never with `sudo`.
 - Backup passwords are passed to `hdiutil` on standard input, never on the command line.
 - Snapshots are mounted with `noowners`, so every file in the backup is readable by you, and
   mounted under your per-user temporary folder.
@@ -144,13 +163,17 @@ file names from your backups, including encrypted ones. Turn it off or clear it 
 - Symbolic links that point outside the backup (e.g. to `/Users/…` on the original Mac) aren't
   followed, so you never see this Mac's files by mistake.
 - Snapshot dates are shown as recorded by the backed-up Mac (its local time).
-- Encrypted backups and legacy HFS+ backups have had less testing than unencrypted APFS ones.
+- Less tested: entering the password of an encrypted backup when it isn't in your keychain, and
+  legacy HFS+ (pre-macOS 11) backups.
 
 ## Debugging
 
 ```sh
-TIMEFINDER_DEBUG=1 open build/TimeFinder.app          # logs every hdiutil/diskutil/mount call to stderr
-open build/TimeFinder.app --args -TFSelect Data/Users/me/Desktop   # preselect an item on launch
+# Log every hdiutil/diskutil/mount call (and cache cross-check) to a file:
+open --env TIMEFINDER_DEBUG=1 --stderr /tmp/timefinder.log build/TimeFinder.app
+
+# Preselect an item on launch:
+open build/TimeFinder.app --args -TFSelect Data/Users/me/Desktop
 ```
 
 Launch through `open` (or Xcode): starting the binary directly from Terminal makes macOS check
