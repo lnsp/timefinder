@@ -34,13 +34,16 @@ xcodebuild -project TimeFinder.xcodeproj -scheme TimeFinder -configuration Relea
   MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$(git rev-list --count HEAD)" \
   CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$IDENTITY" DEVELOPMENT_TEAM= \
   ENABLE_HARDENED_RUNTIME=YES OTHER_CODE_SIGN_FLAGS=--timestamp=none \
+  CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
   build
 APP=build/DerivedData-release/Build/Products/Release/TimeFinder.app
 
 echo "Verifying…"
 codesign --verify --strict --deep "$APP"
 codesign -d -r- "$APP" 2>&1 | grep -q "certificate leaf" || fail "unexpected designated requirement"
-codesign -d --entitlements - "$APP" 2>&1 | grep -q "get-task-allow" && fail "release build allows debugging (get-task-allow)"
+if codesign -d --entitlements - --xml "$APP" 2>/dev/null | plutil -extract com.apple.security.get-task-allow raw - 2>/dev/null | grep -q true; then
+  fail "release build allows debugging (get-task-allow)"
+fi
 [ "$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")" = "$VERSION" ] || fail "version mismatch in Info.plist"
 ARCHS=$(lipo -archs "$APP/Contents/MacOS/TimeFinder")
 echo "  architectures: $ARCHS"
