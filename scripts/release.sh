@@ -62,7 +62,7 @@ fi
 # Git over HTTPS with the GitHub CLI's credentials (works without SSH keys).
 ghgit() { git -c credential.helper= -c credential.helper='!gh auth git-credential' "$@"; }
 
-echo "Publishing v$VERSION…"
+echo "Publishing v${VERSION}…"
 git tag -a "v$VERSION" -m "TimeFinder $VERSION"
 ghgit push --quiet "https://github.com/$REPO.git" "refs/tags/v$VERSION"
 gh release create "v$VERSION" "$OUT/$ZIP" --repo "$REPO" --title "TimeFinder $VERSION" --verify-tag --generate-notes
