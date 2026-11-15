@@ -1,0 +1,9 @@
+// Copy to Config/Local.xcconfig (git-ignored) to sign with your own Apple Developer team.
+// Your team ID: Xcode › Settings › Accounts, or developer.apple.com › Membership.
+
+DEVELOPMENT_TEAM = ABCDE12345
+CODE_SIGN_IDENTITY = Apple Development
+
+// Use your own reverse-DNS prefix so the bundle ID doesn't clash with official builds
+// (Full Disk Access permission is stored per bundle ID).
+PRODUCT_BUNDLE_IDENTIFIER = com.example.TimeFinder

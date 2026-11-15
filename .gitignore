@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+._*
+
+# Xcode / build output
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# Per-developer signing overrides (see Config/Local.xcconfig.example)
+Config/Local.xcconfig
+
+# SwiftPM / SourceKit-LSP index
+.build/
+.swiftpm/

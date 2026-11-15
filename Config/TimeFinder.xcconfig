@@ -1,0 +1,14 @@
+// Shared build settings for the TimeFinder target.
+//
+// Out of the box this builds an ad-hoc signed app ("Sign to Run Locally"), so no Apple
+// Developer account is needed. To sign with your own team, copy Local.xcconfig.example to
+// Local.xcconfig (git-ignored) and fill it in.
+
+PRODUCT_BUNDLE_IDENTIFIER = tech.espe.TimeFinder
+
+CODE_SIGN_STYLE = Automatic
+CODE_SIGN_IDENTITY = -
+DEVELOPMENT_TEAM =
+
+// Must stay last so local values win.
+#include? "Local.xcconfig"
