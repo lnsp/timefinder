@@ -10,5 +10,10 @@ CODE_SIGN_STYLE = Automatic
 CODE_SIGN_IDENTITY = -
 DEVELOPMENT_TEAM =
 
+// Build Debug as a single binary too. Otherwise Xcode splits it into a launcher plus
+// TimeFinder.debug.dylib, which the hardened runtime refuses to load when the app is signed
+// without a Team ID (ad-hoc or self-signed) — the app then fails to launch.
+ENABLE_DEBUG_DYLIB = NO
+
 // Must stay last so local values win.
 #include? "Local.xcconfig"
