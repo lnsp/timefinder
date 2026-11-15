@@ -60,7 +60,7 @@ struct FileTableView: View {
         } rows: {
             ForEach(model.displayedItems) { item in
                 // Dragging rows out to Finder copies them out of the backup.
-                TableRow(item).itemProvider { NSItemProvider(contentsOf: item.url) }
+                TableRow(item).itemProvider { model.canAccessFiles ? NSItemProvider(contentsOf: item.url) : nil }
             }
         }
         .contextMenu(forSelectionType: FileItem.ID.self) { ids in
@@ -130,6 +130,8 @@ struct FileTableView: View {
                 ProgressView().controlSize(.small)
             } else if model.isSearchActive {
                 ContentUnavailableView.search(text: model.searchText)
+            } else if let note = model.listingNote {
+                ContentUnavailableView("Not Cached Yet", systemImage: "clock.arrow.circlepath", description: Text(note))
             } else {
                 Text("This folder is empty")
                     .font(.title3)

@@ -1,8 +1,14 @@
-// Copy to Config/Local.xcconfig (git-ignored) to sign with your own Apple Developer team.
-// Your team ID: Xcode › Settings › Accounts, or developer.apple.com › Membership.
-
+// Copy to Config/Local.xcconfig (git-ignored) to sign with a stable identity, so macOS privacy
+// permissions (Full Disk Access) survive rebuilds.
+//
+// Option A — your Apple Developer team (a free Apple ID works). Team ID: Xcode › Settings › Accounts.
 DEVELOPMENT_TEAM = ABCDE12345
 CODE_SIGN_IDENTITY = Apple Development
+
+// Option B — a self-signed code-signing certificate in your keychain (what releases use):
+// CODE_SIGN_STYLE = Manual
+// CODE_SIGN_IDENTITY = TimeFinder Release Signing
+// DEVELOPMENT_TEAM =
 
 // Use your own reverse-DNS prefix so the bundle ID doesn't clash with official builds
 // (Full Disk Access permission is stored per bundle ID).

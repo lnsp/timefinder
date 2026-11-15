@@ -174,7 +174,10 @@ private struct TimelineHeader: View {
         if model.isScanningVersions { return "Looking for versions…" }
         let versions = model.versionCount
         let backups = model.snapshots.count
-        if versions == 0 { return "Not in any backup" }
+        if versions == 0 {
+            // Unknown marks (not cached yet, or unreadable) mean we can't claim it's absent.
+            return model.versionMarks.values.contains(.unknown) ? "Versions available once connected" : "Not in any backup"
+        }
         return "\(versions) version\(versions == 1 ? "" : "s") in \(backups) backup\(backups == 1 ? "" : "s")"
     }
 }

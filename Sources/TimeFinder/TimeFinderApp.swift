@@ -17,6 +17,11 @@ struct TimeFinderApp: App {
         }
         .defaultSize(width: 1180, height: 720)
         .commands { BrowserCommands(model: model) }
+
+        Settings {
+            SettingsView()
+                .environment(model)
+        }
     }
 }
 
@@ -53,6 +58,9 @@ struct BrowserCommands: Commands {
 
     private var hasSelection: Bool { !model.selection.isEmpty && !isShowingSheet }
     private var isReady: Bool { model.phase == .ready && !isShowingSheet }
+    /// File actions need the live backup, not just the cached listing shown while connecting.
+    private var hasFileSelection: Bool { hasSelection && model.canAccessFiles }
+    private var canUseFiles: Bool { isReady && model.canAccessFiles }
     /// Menu shortcuts beat a sheet's text field, so navigation is disabled while a sheet is up.
     private var isShowingSheet: Bool {
         model.infoItem != nil || model.isGoToFolderPresented || model.passwordRequest != nil
@@ -76,21 +84,21 @@ struct BrowserCommands: Commands {
                 .disabled(!hasSelection)
             Button("Get Info") { model.showInfo() }
                 .keyboardShortcut("i")
-                .disabled(!isReady)
+                .disabled(!canUseFiles)
             Button(quickLookTitle) { model.toggleQuickLook() }
                 .keyboardShortcut("y")
-                .disabled(!hasSelection)
+                .disabled(!hasFileSelection)
             Divider()
             Button("Show in Finder") { model.revealInFinder(model.selection) }
                 .keyboardShortcut("r")
-                .disabled(!hasSelection)
+                .disabled(!hasFileSelection)
             Button("Restore To…") { model.chooseRestoreDestination(for: model.selection) }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
-                .disabled(!hasSelection)
+                .disabled(!hasFileSelection)
             Divider()
             Button("Find") { model.focusSearch() }
                 .keyboardShortcut("f")
-                .disabled(!isReady)
+                .disabled(!canUseFiles)
         }
 
         // Copy puts the *files* on the pasteboard, so ⌘V in Finder restores them. Text fields
@@ -104,7 +112,7 @@ struct BrowserCommands: Commands {
             .keyboardShortcut("c")
             Button("Copy as Pathname") { model.copySelectionPaths() }
                 .keyboardShortcut("c", modifiers: [.command, .option])
-                .disabled(!hasSelection)
+                .disabled(!hasFileSelection)
             Button("Paste") { Self.sendToText(#selector(NSText.paste(_:))) }
                 .keyboardShortcut("v")
             Button("Select All") {
@@ -153,7 +161,7 @@ struct BrowserCommands: Commands {
             Divider()
             Button("Go to Folder…") { model.isGoToFolderPresented = true }
                 .keyboardShortcut("g", modifiers: [.command, .shift])
-                .disabled(!isReady)
+                .disabled(!canUseFiles)
             Divider()
             Button("Older Backup") { model.selectOlderSnapshot() }
                 .keyboardShortcut(.leftArrow, modifiers: [.command, .option])

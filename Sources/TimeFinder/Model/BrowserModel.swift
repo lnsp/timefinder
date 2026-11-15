@@ -32,7 +32,30 @@ final class BrowserModel {
     private(set) var snapshotRoot: URL?
     private(set) var locations: [Location] = []
 
-    var machineName: String { session?.machineName ?? "" }
+    var machineName: String { session?.machineName ?? provisionalMachineName ?? "" }
+
+    // MARK: Cache
+    //
+    // Snapshot metadata is cached per immutable snapshot identity (see SnapshotCache). While the
+    // image is still attaching, the last-known timeline and visited folders are shown
+    // *provisionally* — clearly labelled, with every file action disabled — and replaced by live
+    // data as soon as the backup is connected.
+
+    @ObservationIgnored private var cache: SnapshotCache?
+    private(set) var isProvisional = false
+    private(set) var provisionalAsOf: Date?
+    private(set) var connectingMessage: String?
+    private(set) var listingNote: String?
+    @ObservationIgnored private var provisionalMachineName: String?
+    @ObservationIgnored private var shouldStoreIndex = false
+    /// Sidebar locations came from the cache and haven't been rediscovered on the live backup yet.
+    @ObservationIgnored private var locationsAreCached = false
+    /// The user picked a backup while browsing the cache (otherwise we land on the live latest).
+    @ObservationIgnored private var pickedSnapshotWhileProvisional = false
+    /// Placeholder root for cached items; never read (file access is disabled while provisional).
+    nonisolated static let placeholderRoot = URL(fileURLWithPath: "/.timefinder-not-connected")
+    /// File contents (Quick Look, open, restore, copy, Get Info) need the live backup.
+    var canAccessFiles: Bool { session != nil && !isProvisional && snapshotRoot != nil }
     var currentSnapshot: Snapshot? { snapshots.first { $0.id == currentSnapshotID } }
     private var currentIndex: Int? { snapshots.firstIndex { $0.id == currentSnapshotID } }
     var canGoOlder: Bool { currentIndex.map { $0 + 1 < snapshots.count } ?? false }
@@ -145,6 +168,7 @@ final class BrowserModel {
                 if let index = merged.firstIndex(where: { $0.path == source.path }) {
                     merged[index].modelID = source.modelID ?? merged[index].modelID
                     merged[index].serverURL = source.serverURL ?? merged[index].serverURL
+                    merged[index].imageUUID = source.imageUUID ?? merged[index].imageUUID
                 } else {
                     merged.append(source)
                 }
@@ -197,6 +221,10 @@ final class BrowserModel {
         UserDefaults.standard.set(source.path, forKey: "lastSource")
         needsFullDiskAccess = false
         phase = .working("Opening \(source.name)…")
+        cache = SnapshotCache(imageUUID: source.imageUUID)
+        if let index = cache?.index(), !index.snapshots.isEmpty, index.bundlePath == source.path {
+            enterProvisional(index)
+        }
 
         let previousOpen = openTask   // cancelled, but may still be finishing (and then closing)
         let pendingCloses = closingTasks
@@ -213,7 +241,7 @@ final class BrowserModel {
                     guard let server = resolved.serverURL, let host = URL(string: server)?.host else {
                         throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "\(resolved.path) isn't available. Mount the volume it lives on and try again."])
                     }
-                    phase = .working("Connecting to \(host)…")
+                    setProgress("Connecting to \(host)…")
                     let mountPoints = try await Task.detached { try SourceStore.connect(server) }.value
                     if !resolved.isReachable, let moved = SourceStore.relocate(resolved, to: mountPoints) {
                         // The share came back under a different name (e.g. /Volumes/backup-1).
@@ -226,6 +254,12 @@ final class BrowserModel {
                     }
                 }
                 let source = resolved
+                if cache == nil, SnapshotCache.isEnabled {
+                    // First visit, or the share wasn't mounted earlier: learn the image UUID now.
+                    let uuid = await Task.detached { SnapshotCache.imageUUID(of: source.url) }.value
+                    rememberImageUUID(uuid, for: source.id)
+                    cache = SnapshotCache(imageUUID: uuid)
+                }
                 let opened = try await Task.detached {
                     try BackupSession.open(source, password: password) { message in
                         Task { @MainActor in self.reportProgress(message, for: source.id) }
@@ -237,22 +271,32 @@ final class BrowserModel {
                 }
                 install(opened)
             } catch BackupError.needsFullDiskAccess {
-                guard activeSourceID == currentID else { return }
+                guard activeSourceID == currentID, !Task.isCancelled else { return }
+                abandonProvisional()
                 needsFullDiskAccess = true
                 phase = .failed(BackupError.needsFullDiskAccess.localizedDescription)
             } catch BackupError.needsPassword {
-                guard activeSourceID == currentID else { return }
+                guard activeSourceID == currentID, !Task.isCancelled else { return }
+                abandonProvisional()
                 phase = .failed(BackupError.needsPassword.localizedDescription)
                 passwordRequest = sources.first { $0.id == activeSourceID } ?? source
             } catch CocoaError.userCancelled {
-                guard activeSourceID == currentID else { return }
+                guard activeSourceID == currentID, !Task.isCancelled else { return }
+                abandonProvisional()
                 phase = .idle   // the user cancelled the server login
                 activeSourceID = nil
             } catch {
-                guard activeSourceID == currentID else { return }
+                guard activeSourceID == currentID, !Task.isCancelled else { return }
+                abandonProvisional()
                 phase = .failed(error.localizedDescription)
             }
         }
+    }
+
+    private func rememberImageUUID(_ uuid: String?, for id: BackupSource.ID) {
+        guard let uuid, let index = sources.firstIndex(where: { $0.id == id }), sources[index].imageUUID != uuid else { return }
+        sources[index].imageUUID = uuid
+        SourceStore.save(sources)
     }
 
     private func replaceSource(_ id: BackupSource.ID, with moved: BackupSource) {
@@ -267,7 +311,66 @@ final class BrowserModel {
     }
 
     private func reportProgress(_ message: String, for id: BackupSource.ID) {
-        if case .working = phase, activeSourceID == id { phase = .working(message) }
+        guard activeSourceID == id else { return }
+        setProgress(message)
+    }
+
+    private func setProgress(_ message: String) {
+        if isProvisional {
+            connectingMessage = message
+        } else if case .working = phase {
+            phase = .working(message)
+        }
+    }
+
+    /// Deletes all cached backup data. The open backup keeps working from live data and starts a
+    /// fresh cache (if caching is on).
+    func clearCache() {
+        cache?.retire()   // in-flight tasks holding it must not write old records back
+        cache = nil
+        SnapshotCache.clearAll()
+        if session != nil, let source = sources.first(where: { $0.id == activeSourceID }) {
+            cache = SnapshotCache(imageUUID: source.imageUUID)
+            shouldStoreIndex = true
+        }
+    }
+
+    /// `open TimeFinder.app --args -TFSelect Data/Users/me/file.txt` preselects an item, once.
+    private func takeLaunchSelection(into target: inout [String]) -> FileItem.ID? {
+        guard !didApplyLaunchSelection, let requested = UserDefaults.standard.string(forKey: "TFSelect") else { return nil }
+        didApplyLaunchSelection = true
+        target = Array(requested.split(separator: "/").map(String.init).dropLast())
+        return requested
+    }
+
+    private func enterProvisional(_ index: SnapshotCache.Index) {
+        isProvisional = true
+        provisionalAsOf = index.verifiedAt
+        provisionalMachineName = index.machineName
+        connectingMessage = "Connecting…"
+        snapshots = index.snapshots.map {
+            Snapshot(id: $0.id, date: $0.date, storage: .apfs(device: "", name: $0.id), cacheKey: $0.cacheKey)
+        }
+        locations = index.locations.map { Location(name: $0.name, symbol: $0.symbol, path: $0.path) }
+        locationsAreCached = true
+        pickedSnapshotWhileProvisional = false
+        currentSnapshotID = snapshots.first?.id
+        var target = locations.first(where: { $0.symbol == "house" })?.path ?? []
+        let preselect = takeLaunchSelection(into: &target)
+        path = target
+        phase = .ready
+        reload()
+        if let preselect {
+            selection = [preselect]
+            selectionDidChange()
+        }
+    }
+
+    /// Leaves provisional mode without a session (opening failed): drop the cached view so the
+    /// failure is what's shown.
+    private func abandonProvisional() {
+        guard isProvisional else { return }
+        resetBrowsingState()
     }
 
     private var isFailed: Bool { if case .failed = phase { true } else { false } }
@@ -285,13 +388,27 @@ final class BrowserModel {
     }
 
     private func install(_ session: BackupSession) {
+        let wasProvisional = isProvisional
+        let provisionalSnapshotID = pickedSnapshotWhileProvisional ? currentSnapshotID : nil
         self.session = session
         idleEjected = nil
+        // Still provisional until live data has replaced what's on screen (`didShowLiveListing`):
+        // the banner stays and file actions stay off.
+        if wasProvisional { connectingMessage = "Loading live data…" }
+        infoItem = nil
+        quickLookURL = nil
+        // The live list is the truth: backups thinned out since last time disappear, new ones appear.
         snapshots = session.snapshots
+        cache?.prune(keeping: Set(snapshots.compactMap(\.cacheKey)))
+        shouldStoreIndex = true
         phase = .ready
-        if let newest = snapshots.first {
-            selectSnapshot(newest.id, initial: true)
+        if wasProvisional, let id = provisionalSnapshotID, snapshots.contains(where: { $0.id == id }) {
+            // Keep the user where they are; re-root everything on the live snapshot.
+            selectSnapshot(id, force: true, rediscoverLocations: true)
+        } else if let newest = snapshots.first {
+            selectSnapshot(newest.id, initial: !wasProvisional, force: true, rediscoverLocations: true)
         }
+        if let versionsFor { scanVersions(of: versionsFor) }   // include new backups, verify against live data
     }
 
     /// Closes the open backup (unmounting everything in the background). Refuses while a restore
@@ -307,11 +424,28 @@ final class BrowserModel {
             clearPasteboardIfPointing(into: session)
             closingTasks.insert(Task.detached { session.close() })
         }
+        cache?.flush()
+        cache = nil
         idleEjected = nil
-        isListing = false
         session = nil
         activeSourceID = nil
         phase = .idle
+        resetBrowsingState()
+        return true
+    }
+
+    /// Clears everything shown for a backup (timeline, folder, selection, provisional state).
+    private func resetBrowsingState() {
+        for task in [snapshotTask, listTask, searchTask, versionTask] { task?.cancel() }
+        infoItem = nil
+        quickLookURL = nil
+        locationsAreCached = false
+        isProvisional = false
+        provisionalAsOf = nil
+        provisionalMachineName = nil
+        connectingMessage = nil
+        listingNote = nil
+        isListing = false
         snapshots = []
         currentSnapshotID = nil
         snapshotRoot = nil
@@ -326,7 +460,6 @@ final class BrowserModel {
         updateHistoryFlags()
         clearVersions()
         updateDisplayed()
-        return true
     }
 
     /// Cleanup for app termination: closes the open session and waits for any still closing,
@@ -334,6 +467,7 @@ final class BrowserModel {
     func shutdown(deadline: TimeInterval = 20, completion: @escaping @MainActor () -> Void) {
         let session = self.session
         if let session { clearPasteboardIfPointing(into: session) }
+        cache?.flush()
         let pending = closingTasks
         let work = Task.detached {
             session?.close()
@@ -363,15 +497,24 @@ final class BrowserModel {
 
     // MARK: - Snapshots
 
-    func selectSnapshot(_ id: Snapshot.ID?, initial: Bool = false) {
-        guard let id, let session, let snapshot = snapshots.first(where: { $0.id == id }) else { return }
-        guard id != currentSnapshotID || initial else { return }
+    func selectSnapshot(_ id: Snapshot.ID?, initial: Bool = false, force: Bool = false, rediscoverLocations: Bool = false) {
+        guard let id, snapshots.contains(where: { $0.id == id }) else { return }
+        guard id != currentSnapshotID || initial || force else { return }
+        guard let session, let snapshot = snapshots.first(where: { $0.id == id }) else {
+            // Provisional: switch the cached view only.
+            if isProvisional {
+                currentSnapshotID = id
+                pickedSnapshotWhileProvisional = true
+                reload()
+            }
+            return
+        }
         let previousID = currentSnapshotID
         currentSnapshotID = id
         snapshotTask?.cancel()
 
         let wanted = path
-        let needsLocations = locations.isEmpty
+        let needsLocations = locations.isEmpty || rediscoverLocations || locationsAreCached
         let machineName = session.machineName
         snapshotTask = Task {
             let result = await Task.detached(priority: .userInitiated) { () -> Result<(URL, [String], [Location]?), Error> in
@@ -399,18 +542,13 @@ final class BrowserModel {
                 }
                 if let locations {
                     self.locations = locations
+                    locationsAreCached = false
                     if initial, let home = locations.first(where: { $0.symbol == "house" }) {
                         target = home.path
                     }
                 }
-                // `open TimeFinder.app --args -TFSelect Data/Users/me/file.txt` preselects an item.
-                var preselect: FileItem.ID?
-                if initial, !didApplyLaunchSelection, let requested = UserDefaults.standard.string(forKey: "TFSelect") {
-                    didApplyLaunchSelection = true
-                    let components = requested.split(separator: "/").map(String.init)
-                    target = Array(components.dropLast())
-                    preselect = requested
-                }
+                storeIndexIfNeeded()
+                let preselect = initial ? takeLaunchSelection(into: &target) : nil
                 if target != path { path = target }
                 if let preselect {
                     selection = [preselect]
@@ -424,10 +562,34 @@ final class BrowserModel {
                 // Keep the timeline in sync with what's actually shown.
                 currentSnapshotID = previousID
                 isListing = false
+                if isProvisional {
+                    // Never leave cached data on screen as if it were live.
+                    isProvisional = false
+                    items = []
+                    updateDisplayed()
+                }
                 reload()
                 alert = "Couldn’t open the backup from \(snapshot.date.formatted()):\n\(error.localizedDescription)"
             }
         }
+    }
+
+    /// Remembers this backup's timeline and locations, to show provisionally next time.
+    private func storeIndexIfNeeded() {
+        guard shouldStoreIndex, !locationsAreCached, let session, let cache,
+              let bundlePath = sources.first(where: { $0.id == activeSourceID })?.path else { return }
+        let entries = snapshots.compactMap { snapshot in
+            snapshot.cacheKey.map { SnapshotCache.Index.Entry(id: snapshot.id, date: snapshot.date, cacheKey: $0) }
+        }
+        guard entries.count == snapshots.count else { return }   // only APFS backups are cached
+        shouldStoreIndex = false
+        cache.storeIndex(SnapshotCache.Index(
+            bundlePath: bundlePath,
+            machineName: session.machineName,
+            verifiedAt: Date(),
+            snapshots: entries,
+            locations: locations.map { SnapshotCache.CodableLocation(name: $0.name, symbol: $0.symbol, path: $0.path) }
+        ))
     }
 
     func selectOlderSnapshot() {
@@ -526,6 +688,7 @@ final class BrowserModel {
             navigate(to: item.relativePath)
             return
         }
+        guard canAccessFiles else { return }
         for item in targets where !item.isFolderLike {
             if item.isSymlink {
                 openLink(item)
@@ -571,6 +734,7 @@ final class BrowserModel {
     }
 
     func toggleQuickLook() {
+        guard canAccessFiles else { quickLookURL = nil; return }
         quickLookURL = quickLookURL == nil ? selectedItems.first.flatMap(previewURL(for:)) : nil
     }
 
@@ -581,6 +745,7 @@ final class BrowserModel {
     }
 
     func revealInFinder(_ ids: Set<FileItem.ID>) {
+        guard canAccessFiles else { return }
         let urls = displayedItems.filter { ids.contains($0.id) }.map(\.url)
         if !urls.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(urls) }
     }
@@ -589,20 +754,30 @@ final class BrowserModel {
 
     func reload() {
         listTask?.cancel()
+        listingNote = nil
+        if isProvisional, snapshotRoot == nil, let snapshot = currentSnapshot {
+            showCachedListing(of: snapshot)   // still connecting/mounting: cached, under the banner
+            return
+        }
         guard snapshotRoot != nil, let session, let snapshot = currentSnapshot else {
             items = []
             updateDisplayed()
             return
         }
         let path = self.path
-        let showHidden = self.showHidden
+        let cache = self.cache
         isListing = true
         listTask = Task {
             // Re-resolve the root every time: it remounts the snapshot if its mount disappeared.
             let result = await Task.detached(priority: .userInitiated) { () -> Result<(URL, [FileItem]), Error> in
                 Result {
                     let root = try session.root(for: snapshot)
-                    return (root, try FileItem.list(directory: Self.url(root, path), relativePath: path, showHidden: showHidden))
+                    // Always the full listing (hidden files filtered below), so one cache entry serves both.
+                    let list = try FileItem.list(directory: Self.url(root, path), relativePath: path, showHidden: true)
+                    if let cache, let key = snapshot.cacheKey {
+                        Self.crossCheck(list, against: cache, key: key, path: path)
+                    }
+                    return (root, list)
                 }
             }.value
             guard !Task.isCancelled, currentSnapshotID == snapshot.id else { return }
@@ -610,11 +785,13 @@ final class BrowserModel {
             switch result {
             case .success(let (root, list)):
                 if root != snapshotRoot { snapshotRoot = root }
-                items = list
+                items = list.filter { showHidden || !$0.isHidden }
                 listingError = nil
+                if isProvisional { didShowLiveListing() }
             case .failure(let error):
                 items = []
                 listingError = error.localizedDescription
+                if isProvisional { didShowLiveListing() }
             }
             if !isSearchActive {
                 let kept = selection.intersection(items.map(\.id))
@@ -625,6 +802,49 @@ final class BrowserModel {
             }
             updateDisplayed()
         }
+    }
+
+    /// Live data has replaced the cached view: drop the banner and enable file actions.
+    private func didShowLiveListing() {
+        isProvisional = false
+        provisionalAsOf = nil
+        provisionalMachineName = nil
+        connectingMessage = nil
+    }
+
+    private func showCachedListing(of snapshot: Snapshot) {
+        isListing = false
+        listingError = nil
+        if let key = snapshot.cacheKey, let cached = cache?.listing(key, path: path) {
+            items = cached
+                .map { FileItem(cached: $0, parent: path, root: Self.placeholderRoot) }
+                .filter { showHidden || !$0.isHidden }
+        } else {
+            items = []
+            listingNote = "This folder will appear once \(machineName)’s backup is connected."
+        }
+        let kept = selection.intersection(items.map(\.id))
+        if kept != selection {
+            preserveVersionsOnDeselect = true
+            selection = kept
+        }
+        updateDisplayed()
+    }
+
+    /// Compares a live listing with the cached one and stores it. Snapshots are immutable, so any
+    /// difference means the cache is wrong: everything cached for that snapshot is discarded.
+    nonisolated private static func crossCheck(_ live: [FileItem], against cache: SnapshotCache, key: String, path: [String]) {
+        let liveItems = live.map(SnapshotCache.Item.init).sorted { $0.name < $1.name }
+        let cached = cache.listing(key, path: path)?.sorted(by: { $0.name < $1.name })
+        if let cached, cached != liveItems {
+            Self.log("Cached listing of \(path.joined(separator: "/")) in \(key) didn’t match the backup; discarding that snapshot’s cache.")
+            cache.invalidate(key)
+        }
+        if cached != liveItems { cache.storeListing(liveItems, key, path: path) }
+    }
+
+    nonisolated static func log(_ message: String) {
+        if Shell.debugLogging { FileHandle.standardError.write(Data("[cache] \(message)\n".utf8)) }
     }
 
     private func updateDisplayed() {
@@ -746,16 +966,34 @@ final class BrowserModel {
         let modified: Date?
     }
 
-    private enum Probe {
+    private enum Probe: Equatable {
         case present(Signature)
         case missing
-        case unreadable   // the snapshot couldn't be mounted or read
+        case unreadable   // the snapshot couldn't be mounted or read (or isn't cached yet)
+
+        init(_ cached: SnapshotCache.Probe) {
+            switch cached {
+            case .present(let inode, let size, let modified): self = .present(Signature(inode: inode, size: size, modified: modified))
+            case .missing: self = .missing
+            }
+        }
+
+        /// The cacheable form; nil for `.unreadable`, which must never be cached.
+        var stored: SnapshotCache.Probe? {
+            switch self {
+            case .present(let s): .present(inode: s.inode, size: s.size, modified: s.modified)
+            case .missing: .missing
+            case .unreadable: nil
+            }
+        }
     }
 
     /// Stats the item in every snapshot (mounting them as needed) and marks where it changed.
     private func scanVersions(of relativePath: [String]) {
         versionTask?.cancel()
-        guard let session else { return }
+        let session = self.session
+        let cache = self.cache
+        guard session != nil || isProvisional else { return }
         versionsFor = relativePath
         versionMarks = [:]
         isScanningVersions = true
@@ -767,15 +1005,7 @@ final class BrowserModel {
             for snapshot in oldestFirst {
                 guard !Task.isCancelled else { return }
                 let probe = await Task.detached(priority: .utility) { () -> Probe in
-                    guard let root = try? session.root(for: snapshot) else { return .unreadable }
-                    // attributesOfItem uses lstat, so a symlink is compared as a link, not its target.
-                    guard let attributes = try? FileManager.default.attributesOfItem(atPath: Self.url(root, relativePath).path)
-                    else { return .missing }
-                    return .present(Signature(
-                        inode: (attributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0,
-                        size: (attributes[.size] as? NSNumber)?.int64Value ?? 0,
-                        modified: attributes[.modificationDate] as? Date
-                    ))
+                    Self.probe(relativePath, in: snapshot, session: session, cache: cache)
                 }.value
                 guard !Task.isCancelled else { return }
                 switch probe {
@@ -794,9 +1024,47 @@ final class BrowserModel {
         }
     }
 
+    /// One snapshot's fingerprint of `path`: from the cache when known (no mount needed), else
+    /// live — and when the snapshot is mounted anyway, the cached value is verified against it.
+    nonisolated private static func probe(_ path: [String], in snapshot: Snapshot, session: BackupSession?, cache: SnapshotCache?) -> Probe {
+        let key = snapshot.cacheKey
+        let cached = key.flatMap { cache?.probe($0, path: path) }.map(Probe.init)
+        if let cached, !(session?.isMounted(snapshot) ?? false) { return cached }
+        guard let session else { return cached ?? .unreadable }   // provisional and not cached yet
+        let live = liveProbe(path, in: snapshot, session: session)
+        if let key, let cache, let stored = live.stored {
+            if let cached, cached != live {
+                log("Cached fingerprint of \(path.joined(separator: "/")) in \(key) didn’t match the backup; discarding that snapshot’s cache.")
+                cache.invalidate(key)
+            }
+            cache.storeProbe(stored, key, path: path)
+        }
+        return live
+    }
+
+    nonisolated private static func liveProbe(_ path: [String], in snapshot: Snapshot, session: BackupSession) -> Probe {
+        guard let root = try? session.root(for: snapshot) else { return .unreadable }
+        // lstat: a symlink is compared as a link, not its target. Only "doesn't exist" counts as
+        // absent — any other error (I/O over the network, permissions) is unknown and never cached.
+        let itemPath = url(root, path).path
+        var info = stat()
+        guard lstat(itemPath, &info) == 0 else {
+            return errno == ENOENT || errno == ENOTDIR ? .missing : .unreadable
+        }
+        // Values via FileManager (also lstat-based): its Date conversion differs from a hand-made
+        // one in the last bit, and fingerprints must compare exactly across runs.
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: itemPath) else { return .unreadable }
+        return .present(Signature(
+            inode: (attributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0,
+            size: (attributes[.size] as? NSNumber)?.int64Value ?? 0,
+            modified: attributes[.modificationDate] as? Date
+        ))
+    }
+
     // MARK: - Restore
 
     func chooseRestoreDestination(for ids: Set<FileItem.ID>) {
+        guard canAccessFiles else { return }
         let targets = displayedItems.filter { ids.contains($0.id) }
         guard !targets.isEmpty else { return }
         let panel = NSOpenPanel()

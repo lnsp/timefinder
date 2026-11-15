@@ -35,12 +35,12 @@ struct ContentView: View {
             }
             ToolbarItemGroup(placement: .primaryAction) {
                 Button { model.toggleQuickLook() } label: { Label("Quick Look", systemImage: "eye") }
-                    .disabled(model.selection.isEmpty)
+                    .disabled(model.selection.isEmpty || !model.canAccessFiles)
                     .help("Preview the selected items with Quick Look (Space)")
                 Button { model.chooseRestoreDestination(for: model.selection) } label: {
                     Label("Restore", systemImage: "arrow.uturn.backward.circle")
                 }
-                .disabled(model.selection.isEmpty)
+                .disabled(model.selection.isEmpty || !model.canAccessFiles)
                 .help("Restore the selected items to a folder of your choice (⇧⌘R)")
             }
             ToolbarItem(placement: .primaryAction) {
@@ -71,7 +71,7 @@ struct ContentView: View {
     }
 
     private var title: String {
-        guard model.session != nil else { return "TimeFinder" }
+        guard model.session != nil || model.isProvisional else { return "TimeFinder" }
         return model.path.last ?? model.machineName
     }
 
@@ -134,6 +134,7 @@ struct DetailView: View {
             }
         case .ready:
             VStack(spacing: 0) {
+                if model.isProvisional { ProvisionalBanner() }
                 FileTableView()
                 if model.showPathBar {
                     Divider()
@@ -226,5 +227,37 @@ struct PasswordSheet: View {
         guard !password.isEmpty else { return }
         dismiss()
         model.open(source, password: password)
+    }
+}
+
+/// Shown while the backup is still being connected and the list comes from the cache, so cached
+/// data is never mistaken for live data.
+struct ProvisionalBanner: View {
+    @Environment(BrowserModel.self) private var model
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(model.connectingMessage ?? "Connecting…")
+                        .font(.callout.weight(.medium))
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(.yellow.opacity(0.12))
+            Divider()
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var subtitle: String {
+        let asOf = model.provisionalAsOf.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "an earlier visit"
+        return "Showing backups as of \(asOf) from the cache. Previews, opening and restoring work once connected."
     }
 }

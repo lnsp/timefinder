@@ -15,6 +15,20 @@ Time Machine UI and without restoring a whole machine.
 
 TimeFinder is strictly read-only: it never modifies a backup.
 
+## Install
+
+```sh
+brew install --cask lnsp/tap/timefinder
+```
+
+TimeFinder isn't notarized by Apple (that requires a paid developer account), so macOS blocks the
+first launch: open **System Settings › Privacy & Security** and click **Open Anyway** (needed
+again after each upgrade). Then grant **Full Disk Access** when TimeFinder asks for it — release
+builds are signed with a stable certificate, so that permission survives upgrades.
+
+You can also download the zip from [Releases](https://github.com/lnsp/timefinder/releases) or build
+it yourself (below).
+
 ## Requirements
 
 - macOS 14 Sonoma or later
@@ -69,6 +83,22 @@ Opening a backup over the network can take a while (often 30–60 s): the disk i
 thousands of small files that macOS reads one by one, so the network's latency matters more than
 its speed.
 
+### Cache
+
+To make reopening fast, TimeFinder caches *metadata* from backups you've browsed — folder
+listings and the fingerprints behind version history — never file contents. While a backup is
+still connecting, the last-known timeline and folders you've visited appear immediately under a
+banner that says they're cached and from when; previews, opening and restoring stay disabled
+until the backup is connected, at which point everything is replaced by live data.
+
+Cached data can't go stale: each entry is keyed by an APFS snapshot's UUID and transaction ID,
+and a Time Machine snapshot never changes. The only thing that does change — which backups
+exist — is always taken from the live backup once connected. As a safety net, live listings are
+compared with cached ones and a snapshot's cache is discarded on any difference.
+
+The cache lives in `~/Library/Caches/<bundle id>/Backups/` (user-only permissions) and contains
+file names from your backups, including encrypted ones. Turn it off or clear it in Settings.
+
 ## Security & privacy
 
 - TimeFinder needs Full Disk Access, which allows reading everything on this Mac. It uses it only
@@ -81,6 +111,8 @@ its speed.
   mounted under your per-user temporary folder.
 - Remembered backups and their server URLs (including the user name, never the password) are
   stored in the app's preferences.
+- File names and attributes from browsed backups are cached on this Mac unless you turn the
+  cache off (see Cache above).
 - No network access beyond reconnecting your own file shares. No analytics.
 
 ## Keyboard
@@ -126,7 +158,7 @@ Launch through `open` (or Xcode): starting the binary directly from Terminal mak
 
 ## License
 
-<!-- TODO: choose a license (e.g. MIT) and add LICENSE -->
+Copyright 2026 Lennart Espe. Licensed under the [Apache License, Version 2.0](LICENSE).
 
 TimeFinder is not affiliated with or endorsed by Apple Inc. Time Machine and Finder are trademarks
 of Apple Inc., registered in the U.S. and other countries.

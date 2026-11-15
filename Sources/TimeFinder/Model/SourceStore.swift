@@ -35,7 +35,8 @@ enum SourceStore {
     }
 
     static func makeSource(at url: URL) -> BackupSource {
-        BackupSource(path: url.path, serverURL: serverURL(for: url), modelID: modelID(for: url))
+        BackupSource(path: url.path, serverURL: serverURL(for: url), modelID: modelID(for: url),
+                     imageUUID: SnapshotCache.imageUUID(of: url))
     }
 
     private static func modelID(for bundle: URL) -> String? {

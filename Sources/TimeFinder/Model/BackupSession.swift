@@ -252,7 +252,11 @@ final class BackupSession: @unchecked Sendable {
             guard let name = entry["SnapshotName"] as? String,
                   name.hasPrefix(snapshotPrefix), name.hasSuffix(".backup"),
                   let date = Snapshot.date(fromName: name) else { return nil }
-            return Snapshot(id: name, date: date, storage: .apfs(device: device, name: name))
+            var snapshot = Snapshot(id: name, date: date, storage: .apfs(device: device, name: name))
+            if let uuid = entry["SnapshotUUID"] as? String, let xid = entry["SnapshotXID"] as? Int {
+                snapshot.cacheKey = "\(uuid)-\(xid)"
+            }
+            return snapshot
         }
     }
 
@@ -324,6 +328,13 @@ final class BackupSession: @unchecked Sendable {
         }
     }
 
+    /// Whether a snapshot is already mounted (reading it costs no extra mount).
+    func isMounted(_ snapshot: Snapshot) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return snapshotRoots[snapshot.id] != nil
+    }
+
     /// True if `path` is inside one of this session's snapshot mounts (e.g. a URL on the pasteboard).
     func contains(_ path: String) -> Bool {
         path.hasPrefix(mountBase.path + "/")
@@ -339,12 +350,13 @@ final class BackupSession: @unchecked Sendable {
         defer { lock.unlock() }
         guard !isClosed else { return }
         isClosed = true
-        // Fast path: detaching our image unmounts its volume and snapshots in one go, which also
-        // keeps quitting quick. Otherwise (busy, or the image isn't ours) unmount one by one.
+        // Snapshots first (an image with snapshot mounts can't be detached), then detach the
+        // image, which unmounts its volume too. Unmount volumes one by one only as a fallback,
+        // or when the image isn't ours to detach.
+        for mount in ownedSnapshotMounts.reversed() { Self.unmount(mount) }
         if let image, (try? Shell.run("/usr/bin/hdiutil", ["detach", image.device], timeout: 60)) != nil {
-            // done
+            // done: the volume went with the image
         } else {
-            for mount in ownedSnapshotMounts.reversed() { Self.unmount(mount) }
             for mount in ownedMountPoints.reversed() { Self.unmount(mount) }
             if let image { Self.detach(image) }
         }

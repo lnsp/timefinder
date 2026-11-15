@@ -7,6 +7,9 @@ struct BackupSource: Identifiable, Hashable, Codable {
     /// e.g. `smb://user@server/share` — used to reconnect when the share isn't mounted.
     var serverURL: String?
     var modelID: String?
+    /// The disk image's UUID (bundle Info.plist), remembered so the cache can be used even
+    /// before the share holding the bundle is mounted.
+    var imageUUID: String?
 
     var id: String { path }
     var url: URL { URL(fileURLWithPath: path) }
@@ -35,6 +38,10 @@ struct Snapshot: Identifiable, Hashable, Sendable {
     let id: String
     let date: Date
     let storage: Storage
+    /// Immutable identity for caching: "<APFS snapshot UUID>-<transaction id>". A snapshot's
+    /// contents can never change, so data cached under this key never goes stale. Nil for legacy
+    /// HFS+ backups, which aren't cached.
+    var cacheKey: String?
 
     /// Parses `2026-01-18-112734` out of `com.apple.TimeMachine.2026-01-18-112734.backup`.
     ///
@@ -66,6 +73,9 @@ struct FileItem: Identifiable, Hashable {
     let size: Int64?
     let modified: Date?
     let contentType: UTType?
+    /// The file's inode; used to cross-check cached listings against live ones.
+    let inode: UInt64?
+    let isHidden: Bool
 
     var isFolderLike: Bool { isDirectory && !isPackage }
     var kind: String {
@@ -81,7 +91,7 @@ struct FileItem: Identifiable, Hashable {
 
     static let resourceKeys: [URLResourceKey] = [
         .isDirectoryKey, .isPackageKey, .isSymbolicLinkKey, .isHiddenKey,
-        .fileSizeKey, .contentModificationDateKey, .contentTypeKey,
+        .fileSizeKey, .contentModificationDateKey, .contentTypeKey, .fileIdentifierKey,
     ]
 
     init(url: URL, relativePath: [String]) {
@@ -96,6 +106,26 @@ struct FileItem: Identifiable, Hashable {
         self.size = values?.fileSize.map(Int64.init)
         self.modified = values?.contentModificationDate
         self.contentType = values?.contentType
+        self.inode = values?.fileIdentifier
+        self.isHidden = values?.isHidden ?? relativePath.last?.hasPrefix(".") ?? false
+    }
+
+    /// Rebuilds an item from the cache. `root` is the live snapshot root if connected, else a
+    /// placeholder — file access is disabled while only cached data is shown.
+    init(cached: SnapshotCache.Item, parent: [String], root: URL) {
+        let relativePath = parent + [cached.name]
+        self.id = relativePath.joined(separator: "/")
+        self.url = relativePath.reduce(root) { $0.appendingPathComponent($1) }
+        self.relativePath = relativePath
+        self.name = cached.name
+        self.isDirectory = cached.isDirectory
+        self.isPackage = cached.isPackage
+        self.isSymlink = cached.isSymlink
+        self.size = cached.size
+        self.modified = cached.modified
+        self.contentType = cached.contentType.flatMap { UTType($0) }
+        self.inode = cached.inode
+        self.isHidden = cached.isHidden
     }
 
     /// Lists a directory. Blocking; call off the main thread.

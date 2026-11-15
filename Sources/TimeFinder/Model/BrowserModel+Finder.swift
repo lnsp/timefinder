@@ -70,6 +70,7 @@ extension BrowserModel {
     /// Like Finder: with several items selected, Quick Look pages through those; with one,
     /// the arrow keys page through the whole folder and the selection follows.
     var quickLookURLs: [URL] {
+        guard canAccessFiles else { return [] }
         let items = selection.count > 1 ? selectedItems : displayedItems
         // Quick Look follows symlinks; skip links that point outside the backup (this Mac's files).
         return items.compactMap(previewURL(for:))
@@ -87,6 +88,7 @@ extension BrowserModel {
 
     /// Puts the files themselves on the pasteboard: pasting in Finder restores them.
     func copySelectionToPasteboard() {
+        guard canAccessFiles else { return }
         let urls = selectedURLs
         guard !urls.isEmpty else { return }
         NSPasteboard.general.clearContents()
@@ -94,6 +96,7 @@ extension BrowserModel {
     }
 
     func copySelectionPaths() {
+        guard canAccessFiles else { return }
         let paths = selectedURLs.map(\.path)
         guard !paths.isEmpty else { return }
         NSPasteboard.general.clearContents()
@@ -104,6 +107,7 @@ extension BrowserModel {
 
     /// Get Info on the selection, or on the current folder when nothing is selected (like Finder).
     func showInfo() {
+        guard canAccessFiles else { return }
         if let item = selectedItems.first {
             infoItem = item
         } else if let root = snapshotRoot {
