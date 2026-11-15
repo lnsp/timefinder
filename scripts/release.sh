@@ -59,17 +59,20 @@ if [ "$PUBLISH" != "--publish" ]; then
   exit 0
 fi
 
+# Git over HTTPS with the GitHub CLI's credentials (works without SSH keys).
+ghgit() { git -c credential.helper= -c credential.helper='!gh auth git-credential' "$@"; }
+
 echo "Publishing v$VERSION…"
 git tag -a "v$VERSION" -m "TimeFinder $VERSION"
-git push origin "v$VERSION"
-gh release create "v$VERSION" "$OUT/$ZIP" --repo "$REPO" --title "TimeFinder $VERSION" --generate-notes
+ghgit push --quiet "https://github.com/$REPO.git" "refs/tags/v$VERSION"
+gh release create "v$VERSION" "$OUT/$ZIP" --repo "$REPO" --title "TimeFinder $VERSION" --verify-tag --generate-notes
 
 TAP=$(mktemp -d)
 trap 'rm -rf "$TAP"' EXIT
-gh repo clone "$TAP_REPO" "$TAP" -- --quiet
+ghgit clone --quiet "https://github.com/$TAP_REPO.git" "$TAP"
 mkdir -p "$TAP/Casks"
 cp "$OUT/timefinder.rb" "$TAP/Casks/timefinder.rb"
 git -C "$TAP" add Casks/timefinder.rb
 git -C "$TAP" commit --quiet -m "timefinder $VERSION"
-git -C "$TAP" push --quiet
+ghgit -C "$TAP" push --quiet
 echo "Released: brew install --cask ${TAP_REPO%%/*}/tap/timefinder"
